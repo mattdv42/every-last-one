@@ -1,0 +1,1900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Every Last One</title>
+<style>
+  :root { --dusk: #1a2028; --paper: #e8e2d4; --copper: #a1622c; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px;
+    padding: 16px; background: var(--dusk); color: var(--paper);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  h1 { margin: 0; font-family: Georgia, serif; font-weight: 400;
+       font-size: 26px; letter-spacing: 0.02em; }
+  h1 em { color: var(--copper); font-style: italic; }
+  canvas { width: 100%; max-width: 820px; height: auto; border-radius: 3px;
+           touch-action: none; background: #2b2118; }
+  .bar { display: flex; align-items: center; gap: 16px; width: 100%;
+         max-width: 820px; justify-content: space-between; }
+  p.hint { margin: 0; font-size: 12px; opacity: 0.55;
+           letter-spacing: 0.06em; text-transform: uppercase; }
+  button { font: inherit; font-size: 12px; letter-spacing: 0.06em;
+           text-transform: uppercase; color: var(--paper); cursor: pointer;
+           background: rgba(255,255,255,0.05); padding: 5px 12px;
+           border: 1px solid rgba(232,226,212,0.25); border-radius: 3px; }
+  button:hover { border-color: rgba(232,226,212,0.6); }
+</style>
+</head>
+<body>
+
+<h1>Every <em>Last</em> One</h1>
+<canvas id="screen" width="820" height="560"></canvas>
+<div class="bar">
+  <p class="hint">Space shakes · X sprays · the trap moves at dusk</p>
+  <button id="mute">sound on</button>
+</div>
+
+<script>
+// ===========================================================================
+// 0. CRASH REPORTER — registered first so it catches setup errors too.
+// ===========================================================================
+
+function showFatal(msg) {
+  try {
+    const c = document.getElementById("screen");
+    const g = c.getContext("2d");
+    g.fillStyle = "#2b2118"; g.fillRect(0, 0, c.width, c.height);
+    g.textAlign = "left";
+    g.fillStyle = "#e8e2d4"; g.font = "15px ui-monospace, monospace";
+    g.fillText("Something broke while loading:", 34, 60);
+    g.fillStyle = "#e07a5f"; g.font = "13px ui-monospace, monospace";
+    let line = "", y = 96;
+    for (const word of String(msg).split(/\s+/)) {
+      if ((line + word).length > 74) { g.fillText(line, 34, y); y += 22; line = ""; }
+      line += word + " ";
+    }
+    g.fillText(line, 34, y);
+    g.fillStyle = "rgba(232,226,212,0.5)"; g.font = "12px ui-monospace, monospace";
+    g.fillText("Send me this text and I can fix it.", 34, y + 44);
+  } catch (e) { /* nothing left to draw on */ }
+}
+
+window.addEventListener("error", (e) => {
+  showFatal((e.message || "unknown error") +
+            (e.lineno ? "  (line " + e.lineno + ")" : ""));
+});
+
+
+// ===========================================================================
+// 1. DIALS
+// ===========================================================================
+
+// Off for the shared build: no tuning keys, no debug readout.
+const DEBUG = false;
+
+const SEASON_DAYS = 31;
+const DAY_LENGTH  = 25;
+
+const QUART_COST  = 40;
+const CLOTH_COST  = 20;
+const TRAP_COST   = 55;
+
+// Live-tunable while DEBUG is on — press C and V in game. BASE_CHEW starts
+// lower than it did (was 2.2) so plants survive peak July long enough to
+// be defended at all.
+let BASE_CHEW = 1.7;
+const CHEW_STEPS = [2.2, 1.9, 1.7, 1.5, 1.3];
+const EMPTY_TIME_PINT  = 3.0;
+const EMPTY_TIME_QUART = 4.5;
+const PINT_CAPACITY  = 15;
+const QUART_CAPACITY = 28;
+
+const SCENT_PER_BEETLE = 0.42;
+const SCENT_DECAY      = 0.30;
+const SCENT_CAP        = 2.6;
+
+let SHAKE_COOLDOWN = 2.5;
+const SHAKE_STEPS = [2.5, 2.0, 1.6, 1.2];
+const SHAKE_FLY_BASE = 0.08;
+const SHAKE_FLY_HEAT = 0.35;
+const SHAKE_ESCAPE   = 0.30;   // of those that fly, the share that just leaves
+
+const CLINGER_BASE = 0.06;
+const CLINGER_HEAT = 0.32;
+
+// The trap lures hard, catches most of what it lures, and brings more
+// beetles into the yard than it can hold. All three are true of real ones.
+const TRAP_PULL  = 5.5;
+const TRAP_BOOST = 1.7;    // extra arrivals while a working trap is out
+const TRAP_CAP   = 14;     // fills in about half a hot day, then it's a liability
+const TRAP_EMPTY_TIME = 2.5;
+
+// The container follows your pointer at a finite speed instead of teleporting
+// to it. Short corrections are imperceptible; crossing the garden costs real
+// time, which is what makes the drain's distance mean anything. Set this to
+// 99999 to get the old instant behaviour back.
+const HAND_SPEED = 1600;
+
+// If you click while the container is still travelling, the click is held
+// and resolved the moment it arrives. Your aim was right; you were just a few
+// frames early. Games buffer input like this constantly.
+const CLICK_BUFFER = 0.18;
+
+// How full of soapy water an empty container already is.
+const BASE_SUDS = 0.55;
+
+const SPRAY_COST = 50;
+const SPRAY_RESIDUAL = 12;   // seconds of near-silence after spraying
+const SPRAY_WEB_BLOCK = 7;   // days before spiders can re-establish
+const SPRAY_REBOUND = 0.38;  // peak extra emergence during the resurgence
+
+// Webs live in the gaps BETWEEN plants, so a fully planted bed has nowhere
+// to put them. Their catches are rare on purpose — a spider taking a beetle
+// this size is uncommon. Their real job is being a number you can count,
+// standing in for the ground predators you never see working.
+const GAP_X = [240, 340, 440, 540];
+const WEB_CATCH = 0.11;
+const WEB_HOLD = 1.4;
+const WEB_SUPPRESS = 0.055;
+const WEB_GROW_CHANCE = 0.55;
+
+// stay is the chance a spell continues into a second day. It decays by a
+// third each further day and hard-stops at SPELL_CAP, so heat waves arrive,
+// hold, and burn out instead of streaking forever.
+const SPELL_CAP = 5;
+const SPELL_DECAY = 0.63;
+
+const WEATHER = {
+  clear:    { key: "clear",    label: "Clear",    heat: 1.00, press: 1.00, regen: 14, stay: 0.55, tint: null,           blend: 0    },
+  scorcher: { key: "scorcher", label: "Scorcher", heat: 1.28, press: 1.35, regen: 9,  stay: 0.62, tint: [178, 150, 94],  blend: 0.26 },
+  overcast: { key: "overcast", label: "Overcast", heat: 0.68, press: 0.85, regen: 18, stay: 0.50, tint: [104, 108, 108], blend: 0.45 },
+  rain:     { key: "rain",     label: "Rain",     heat: 0.40, press: 0.70, regen: 30, stay: 0.30, tint: [62, 70, 78],    blend: 0.62 },
+};
+
+
+// ===========================================================================
+// 2. GEOMETRY
+// ===========================================================================
+
+const canvas = document.getElementById("screen");
+const pen = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+const GROUND = 430;
+
+const SLOT_X = [190, 290, 390, 490, 590];
+const BED = { x: 142, y: GROUND - 6, w: 496, h: 22 };
+const DRAIN = { x: 734, y: GROUND + 30, w: 78, h: 52 };
+
+// x is the post. The bag hangs 22px to its right, and the bag is what you
+// have to stand at to empty it — so these are spaced against where the
+// container needs to sit to reach the outermost leaves, not against the stems.
+const TRAP_SPOTS = [
+  { name: "Far corner",   x: 44,  leak: 0.14, aimed: false },
+  { name: "Left of bed",  x: 100, leak: 0.45, aimed: true },
+  { name: "Right of bed", x: 660, leak: 0.45, aimed: true },
+];
+
+const LEAF_SPREAD = 28;
+const CLOTH_REACH = 42;
+
+const SHOP = { x: 80, y: 22, w: 660, h: 512 };
+const BTN_QUART = { x: SHOP.x + 490, y: SHOP.y + 98,  w: 130, h: 34 };
+const BTN_CLOTH = { x: SHOP.x + 490, y: SHOP.y + 142, w: 130, h: 34 };
+const BTN_TRAP  = { x: SHOP.x + 490, y: SHOP.y + 216, w: 130, h: 34 };
+const BTN_SPRAY = { x: SHOP.x + 490, y: SHOP.y + 290, w: 130, h: 34 };
+const CLOTH_SLOTS = [0, 1, 2, 3, 4].map(i => (
+  { x: SHOP.x + 35 + i * 120, y: SHOP.y + 184, w: 110, h: 24 }
+));
+const TRAP_CHIPS = [0, 1, 2].map(i => (
+  { x: SHOP.x + 95 + i * 160, y: SHOP.y + 258, w: 150, h: 24 }
+));
+const SLOT_CHIPS = [0, 1, 2, 3, 4].map(i => (
+  { x: SHOP.x + 35 + i * 120, y: SHOP.y + 364, w: 110, h: 30 }
+));
+const PLANT_BTNS = [0, 1, 2].map(i => (
+  { x: SHOP.x + 35 + i * 150, y: SHOP.y + 416, w: 140, h: 30 }
+));
+const BTN_BEGIN = { x: SHOP.x + 230, y: SHOP.y + 474, w: 200, h: 34 };
+
+const PLANT_TYPES = [
+  { key: "rose",      name: "Rose",      appeal: 4.0, value: 12, cost: 34, color: "#c26b7a" },
+  { key: "raspberry", name: "Raspberry", appeal: 2.5, value:  8, cost: 24, color: "#8a4257" },
+  { key: "kale",      name: "Kale",      appeal: 1.2, value:  3, cost: 10, color: "#5f8f6b" },
+];
+
+
+// ===========================================================================
+// 3. SOUND
+// ===========================================================================
+
+let audio = null, master = null, NOISE = null, muted = false;
+
+function ensureAudio() {
+  if (audio || muted) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    audio = new Ctx();
+    master = audio.createGain();
+    master.gain.value = 0.9;
+    master.connect(audio.destination);
+    const n = Math.floor(audio.sampleRate * 0.5);
+    NOISE = audio.createBuffer(1, n, audio.sampleRate);
+    const data = NOISE.getChannelData(0);
+    for (let i = 0; i < n; i++) data[i] = Math.random() * 2 - 1;
+  } catch (e) { audio = null; }
+}
+
+function noiseBurst(t, dur, freq, q, peak) {
+  const src = audio.createBufferSource();
+  src.buffer = NOISE;
+  const filt = audio.createBiquadFilter();
+  filt.type = "bandpass"; filt.frequency.value = freq; filt.Q.value = q;
+  const g = audio.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(peak, t + dur * 0.12);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(filt); filt.connect(g); g.connect(master);
+  src.start(t); src.stop(t + dur + 0.02);
+}
+
+function tone(t, dur, from, to, peak, type) {
+  const osc = audio.createOscillator();
+  const g = audio.createGain();
+  osc.type = type || "sine";
+  osc.frequency.setValueAtTime(from, t);
+  osc.frequency.exponentialRampToValueAtTime(to, t + dur);
+  g.gain.setValueAtTime(peak, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g); g.connect(master);
+  osc.start(t); osc.stop(t + dur + 0.02);
+}
+
+function sfxPlop() {
+  if (!audio || muted) return;
+  const t = audio.currentTime;
+  tone(t, 0.11, 400 + Math.random() * 120, 85, 0.20);
+  noiseBurst(t + 0.01, 0.09, 1500 + Math.random() * 500, 0.7, 0.09);
+}
+function sfxRustle() {
+  if (!audio || muted) return;
+  noiseBurst(audio.currentTime, 0.3, 2400, 0.6, 0.12);
+}
+function sfxTick() {
+  if (!audio || muted) return;
+  tone(audio.currentTime, 0.05, 200, 120, 0.10, "square");
+}
+function sfxPour() {
+  if (!audio || muted) return;
+  const t = audio.currentTime;
+  noiseBurst(t, 1.1, 900, 0.5, 0.13);
+  tone(t + 0.05, 0.9, 180, 70, 0.06);
+}
+function sfxThunk() {
+  if (!audio || muted) return;
+  tone(audio.currentTime, 0.14, 130, 70, 0.16, "triangle");
+}
+function sfxDusk() {
+  if (!audio || muted) return;
+  const t = audio.currentTime;
+  tone(t, 0.5, 392, 392, 0.09, "sine");
+  tone(t + 0.12, 0.7, 523, 523, 0.08, "sine");
+}
+// Drier and duller than a catch — it went in a bag, not in the water.
+function sfxTrap() {
+  if (!audio || muted) return;
+  noiseBurst(audio.currentTime, 0.12, 700, 1.4, 0.07);
+}
+
+const muteBtn = document.getElementById("mute");
+if (muteBtn) {
+  muteBtn.addEventListener("click", (e) => {
+    muted = !muted;
+    e.target.textContent = muted ? "sound off" : "sound on";
+    if (master) master.gain.value = muted ? 0 : 0.9;
+    if (!muted) ensureAudio();
+  });
+}
+
+
+// ===========================================================================
+// 4. STATE
+// ===========================================================================
+
+function makePlant(type, slot) {
+  return {
+    type, slot, x: SLOT_X[slot],
+    name: type.name, appeal: type.appeal, value: type.value, color: type.color,
+    health: 100, maxHealth: 100,
+    scent: 0, moteTimer: 0, feeders: 0,
+    shakeCd: 0, shakeAnim: 0,
+  };
+}
+
+let plots, beetles, splashes, ripples, motes, raindrops;
+let caught, capacity, emptyTime, emptying, fullWarning;
+let hand, handVel;
+let day, clock, spawnTimer, weather, forecast;
+let phase, endReason, money, earnedToday, best;
+let ownQuart, ownCloth, clothOn, pickedSlot;
+let ownTrap, trapAt, trapFill, trapEmptying, trapCaughtToday;
+let webs, webKills;
+let ptr, spellDays, forecastRun;
+let animT = 0;
+let clickBuffer = 0;
+let paused = false;
+
+// Recorded so the end screen can show what actually happened in a run.
+// A screenshot from a tester is worth far more than their recollection.
+let runLog = { quart: 0, cloth: 0, trap: 0, planted: 0, sprays: [] };
+
+// Touch devices can't hover, so the container only moves while a finger is
+// down. Better to say so than let someone assume they're doing it wrong.
+let coarsePointer = false;
+try {
+  coarsePointer = !!(window.matchMedia &&
+                     window.matchMedia("(pointer: coarse)").matches);
+} catch (e) {}
+let hintText = "", hintTimer = 0;
+const seen = {};        // hints already given; deliberately not reset on replay
+
+function hint(key, text, secs) {
+  if (seen[key]) return;
+  seen[key] = true;
+  hintText = text;
+  hintTimer = secs || 7;
+}
+let sprayStock, sprayDay, webBlock, sprayResidual, sprayFlash;
+
+// A gap can hold a web only if at least one of the plants beside it is
+// missing. Fill every slot for maximum income and you evict the spiders —
+// the most profitable bed is also the least defended one.
+function gapOpen(i) { return plots[i] === null || plots[i + 1] === null; }
+
+function pruneWebs() { webs = webs.filter(gapOpen); }
+
+function growWebs() {
+  pruneWebs();
+  if (webBlock > 0) return;   // nothing is re-establishing yet
+  const open = [0, 1, 2, 3].filter(i => gapOpen(i) && webs.indexOf(i) === -1);
+  if (open.length && Math.random() < WEB_GROW_CHANCE) {
+    webs.push(open[Math.floor(Math.random() * open.length)]);
+  }
+}
+
+function resetGame() {
+  plots = [null, null, null, null, null];
+  plant(PLANT_TYPES[0], 0);
+  plant(PLANT_TYPES[1], 2);
+  plant(PLANT_TYPES[2], 4);
+
+  beetles = []; splashes = []; ripples = []; motes = [];
+  raindrops = [];
+  for (let i = 0; i < 70; i++) {
+    raindrops.push({ x: Math.random() * W, y: Math.random() * GROUND,
+                     speed: 420 + Math.random() * 260 });
+  }
+
+  caught = 0; capacity = PINT_CAPACITY; emptyTime = EMPTY_TIME_PINT;
+  emptying = 0; fullWarning = 0;
+  hand = { x: W / 2, y: GROUND - 40 }; handVel = 0;
+
+  day = 1; clock = 0; spawnTimer = 1.4;
+  weather = WEATHER.clear;
+  spellDays = 1;
+  forecast = WEATHER[freshWeather(2, null)];
+  forecastRun = 1;
+
+  phase = "day"; endReason = "";
+  money = 0; earnedToday = 0;
+
+  ownQuart = false; ownCloth = false;
+  clothOn = null; pickedSlot = null;
+  ownTrap = false; trapAt = null;
+  trapFill = 0; trapEmptying = 0; trapCaughtToday = 0;
+  webs = [0]; webKills = 0;
+  ptr = { x: W / 2, y: GROUND - 40 };
+  spellDays = 1;
+  sprayStock = 0; sprayDay = -99; webBlock = 0;
+  sprayResidual = 0; sprayFlash = 0;
+  paused = false;
+  runLog = { quart: 0, cloth: 0, trap: 0, planted: 0, sprays: [] };
+}
+
+function plant(type, slot) { plots[slot] = makePlant(type, slot); }
+
+function livingCount() {
+  let n = 0;
+  for (const p of plots) if (p && p.health > 0) n++;
+  return n;
+}
+
+// A fresh spell, biased by where we are in July. Excludes whatever is ending,
+// so "a new spell" always means a genuinely different sky.
+function freshWeather(forDay, excludeKey) {
+  const mid = Math.sin(Math.PI * (forDay - 0.5) / SEASON_DAYS);
+  // These are odds per SPELL, not per day. Rain spells are short, so its
+  // weight has to be well above its share of days or it disappears entirely —
+  // which is exactly what happened when spells replaced the daily roll.
+  const weights = {
+    rain: 0.22, overcast: 0.24,
+    scorcher: 0.42 * Math.max(0, mid), clear: 0.32,
+  };
+  if (excludeKey) weights[excludeKey] = 0;
+
+  let total = 0;
+  for (const k in weights) total += weights[k];
+  if (total <= 0) return "clear";
+  let roll = Math.random() * total;
+  for (const k in weights) { roll -= weights[k]; if (roll <= 0) return k; }
+  return "clear";
+}
+
+// Stickiness decays a third per extra day and hard-stops at SPELL_CAP, so a
+// heat wave arrives, holds a few days, and burns out — rather than streaking.
+function rollWeather(forDay) {
+  const stay = weather.stay * Math.pow(SPELL_DECAY, spellDays - 1);
+  if (spellDays < SPELL_CAP && Math.random() < stay) return weather.key;
+  return freshWeather(forDay, weather.key);
+}
+
+resetGame();
+
+function dayFraction() { return clock / DAY_LENGTH; }
+
+function heatNow() {
+  if (phase !== "day") return 0;
+  // Clamped because Math.pow of a negative base with a fractional exponent is
+  // NaN, and a NaN here silently spreads into every colour on screen.
+  const t = Math.min(1, Math.max(0, dayFraction()));
+  const base = Math.pow(Math.sin(Math.PI * t), 1.35);
+  return Math.min(1.3, base * weather.heat);
+}
+
+// What the spray costs, spread over the following week. The beetles are back
+// within a day because they fly in from every yard on the block; the things
+// that were eating them underground take far longer to come back.
+function resurgence() {
+  if (sprayDay < 0) return 1;
+  const since = day - sprayDay;
+  if (since < 1 || since > 8) return 1;
+  return 1 + SPRAY_REBOUND * Math.sin(Math.PI * (since - 1) / 8);
+}
+
+function seasonPressure() {
+  const t = (day - 0.5) / SEASON_DAYS;
+  const season = 0.55 + 0.90 * Math.pow(Math.sin(Math.PI * t), 1.25);
+  const beneficials = Math.max(0.6, 1 - WEB_SUPPRESS * webs.length);
+  const residual = sprayResidual > 0 ? 0.15 : 1;
+  return season * weather.press * beneficials * resurgence() * residual;
+}
+
+function clockLabel() {
+  const hours = 6 + dayFraction() * 14;
+  const h = Math.floor(hours);
+  const m = Math.floor((hours - h) * 12) * 5;
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return h12 + ":" + String(m).padStart(2, "0") + (h < 12 ? "am" : "pm");
+}
+
+function trapWorking() { return trapAt !== null && trapFill < TRAP_CAP; }
+
+function seasonScore() {
+  let garden = 0;
+  for (const p of plots) if (p) garden += p.value * (p.health / p.maxHealth);
+  return Math.round(money + garden * 10);
+}
+
+function loadBest() {
+  try { return parseInt(localStorage.getItem("elo_best") || "0", 10) || 0; }
+  catch (e) { return 0; }
+}
+function saveBest(v) {
+  try { localStorage.setItem("elo_best", String(v)); } catch (e) {}
+}
+best = loadBest();
+phase = "title";
+
+
+// ===========================================================================
+// 5. LEAVES, SCENT, SPAWNING
+// ===========================================================================
+
+function leafCount(p) { return Math.ceil((p.health / p.maxHealth) * 6); }
+
+function leafPos(p, i) {
+  const side = i % 2 === 0 ? -1 : 1;
+  return { x: p.x + side * LEAF_SPREAD, y: GROUND - 35 - i * 22, side };
+}
+
+function landingSpot(p) {
+  const leaf = leafPos(p, Math.floor(Math.random() * Math.max(1, leafCount(p))));
+  return { x: leaf.x + (Math.random() - 0.5) * 18,
+           y: leaf.y + (Math.random() - 0.5) * 8 };
+}
+
+function pullOf(p) {
+  return (!p || p.health <= 0) ? 0 : p.appeal * (1 + p.scent);
+}
+
+// `avoid` lets a beetle be steered away from the plant it was just shaken
+// off. Without it they nearly all went straight back: that plant still holds
+// the strongest scent, so the weighting sends them home again.
+function pickPlantByScent(avoid) {
+  let total = 0;
+  for (const p of plots) if (p !== avoid) total += pullOf(p);
+  if (total <= 0) return (avoid && avoid.health > 0) ? avoid : null;
+  let roll = Math.random() * total;
+  for (const p of plots) {
+    if (p === avoid) continue;
+    roll -= pullOf(p);
+    if (roll <= 0 && p) return p;
+  }
+  return null;
+}
+
+function nearestPlantTo(x) {
+  let found = null, bd = Infinity;
+  for (const p of plots) {
+    if (!p || p.health <= 0) continue;
+    const d = Math.abs(p.x - x);
+    if (d < bd) { bd = d; found = p; }
+  }
+  return found;
+}
+
+// The trap competes with the plants for every arrival, which is why it helps
+// at all. It only competes while it still has room in the bag.
+function pickTarget() {
+  const trapPull = trapWorking() ? TRAP_PULL : 0;
+  let total = trapPull;
+  for (const p of plots) total += pullOf(p);
+  if (total <= 0) return null;
+
+  let roll = Math.random() * total;
+  if (trapPull > 0) {
+    roll -= trapPull;
+    if (roll <= 0) return "trap";
+  }
+  for (const p of plots) {
+    roll -= pullOf(p);
+    if (roll <= 0 && p) return p;
+  }
+  return null;
+}
+
+function newBeetle(toX, toY, targetPlant, toTrap) {
+  beetles.push({
+    plant: targetPlant,
+    x: toX + (Math.random() - 0.5) * 260, y: -40,
+    toX, toY,
+    state: "arriving", vy: 0, timer: 0, toTrap: !!toTrap, avoid: null,
+    tried: 0,            // bitmask of webs already rolled against
+    wobble: Math.random() * 6.28,
+    clinger: Math.random() < CLINGER_BASE + CLINGER_HEAT * heatNow(),
+    jolt: 0,
+  });
+}
+
+// Rolled once per beetle per web, the first time it crosses that gap.
+function checkWebs(b) {
+  for (const gi of webs) {
+    if (b.tried & (1 << gi)) continue;
+    if (Math.abs(b.x - GAP_X[gi]) > 26) continue;
+    if (b.y < GROUND - 190 || b.y > GROUND - 30) continue;
+    b.tried |= (1 << gi);
+    if (Math.random() < WEB_CATCH) {
+      b.state = "webbed"; b.timer = WEB_HOLD;
+      b.x = GAP_X[gi]; b.y = GROUND - 96;
+      sfxTrap();
+      return;
+    }
+  }
+}
+
+function spawnBeetle() {
+  const target = pickTarget();
+  if (!target) return;
+
+  if (target === "trap") {
+    const spot = TRAP_SPOTS[trapAt];
+    if (Math.random() < spot.leak) {
+      // Lured in, but it never found the bag. Aimed spots dump it on the
+      // plant they're standing next to — which is the point of going near.
+      const p = spot.aimed ? (nearestPlantTo(spot.x) || pickPlantByScent())
+                           : pickPlantByScent();
+      if (!p) return;
+      const s = landingSpot(p);
+      newBeetle(s.x, s.y, p, false);
+    } else {
+      newBeetle(spot.x + (Math.random() - 0.5) * 16, GROUND - 96, null, true);
+    }
+    return;
+  }
+
+  const s = landingSpot(target);
+  newBeetle(s.x, s.y, target, false);
+}
+
+
+// ===========================================================================
+// 6. UPDATE
+// ===========================================================================
+
+function update(dt) {
+  updateEffects(dt);
+  if (sprayFlash > 0) sprayFlash -= dt;
+  if (phase !== "day") return;
+
+  moveContainer(dt);
+  if (sprayResidual > 0) sprayResidual -= dt;
+
+  if (clickBuffer > 0) {
+    clickBuffer -= dt;
+    if (containerSettled()) { clickBuffer = 0; resolveClick(); }
+  }
+
+  if (hintTimer > 0) hintTimer -= dt;
+  checkHints();
+  if (emptying > 0) {
+    emptying -= dt;
+    if (emptying <= 0) { emptying = 0; caught = 0; }
+  }
+  if (trapEmptying > 0) {
+    trapEmptying -= dt;
+    if (trapEmptying <= 0) { trapEmptying = 0; trapFill = 0; }
+  }
+  if (fullWarning > 0) fullWarning -= dt;
+
+  clock += dt;
+  if (clock >= DAY_LENGTH) { closeOutDay(); return; }
+
+  const heat = heatNow();
+  if (heat > 0.04) {
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      spawnBeetle();
+      const gardenPull = 0.55 + 0.15 * livingCount();
+      const boost = trapWorking() ? TRAP_BOOST : 1.0;
+      const interval = (3.4 - 2.6 * Math.min(1, heat)) /
+                       (seasonPressure() * gardenPull * boost);
+      spawnTimer = interval * (0.7 + Math.random() * 0.6);
+    }
+  }
+
+  updateBeetles(dt);
+  updateScent(dt);
+  catchFallers();
+
+  for (const p of plots) {
+    if (!p) continue;
+    if (p.shakeCd > 0) p.shakeCd -= dt;
+    if (p.shakeAnim > 0) p.shakeAnim = Math.max(0, p.shakeAnim - dt * 1.7);
+  }
+
+  if (livingCount() === 0) { phase = "end"; endReason = "stripped"; finishSeason(); }
+}
+
+function closeOutDay() {
+  earnedToday = 0;
+  for (const p of plots) if (p) earnedToday += p.value * (p.health / p.maxHealth);
+  earnedToday = Math.round(earnedToday);
+  money += earnedToday;
+
+  beetles = [];
+  for (let i = 0; i < plots.length; i++) {
+    const p = plots[i];
+    if (!p) continue;
+    if (p.health <= 0) {
+      plots[i] = null;
+      if (clothOn === i) clothOn = null;
+      continue;
+    }
+    // A stripped plant has almost no leaf left to grow with, so recovery
+    // slows exactly when you most need it to hurry.
+    const frac = p.health / p.maxHealth;
+    const grow = Math.round(weather.regen * (0.4 + 0.6 * frac));
+    p.grew = Math.min(p.maxHealth - p.health, grow);
+    p.health = Math.min(p.maxHealth, p.health + grow);
+    p.scent = 0;
+  }
+  growWebs();
+  caught = 0; emptying = 0; pickedSlot = null;
+  trapEmptying = 0;   // the bag gets dealt with overnight
+
+  sfxDusk();
+
+  if (day >= SEASON_DAYS) { phase = "end"; endReason = "season"; finishSeason(); }
+  else phase = "shop";
+}
+
+function finishSeason() {
+  const s = seasonScore();
+  if (s > best) { best = s; saveBest(best); }
+}
+
+function beginNextDay() {
+  day++; clock = 0; spawnTimer = 1.4; phase = "day"; pickedSlot = null;
+
+  spellDays = (forecast === weather) ? spellDays + 1 : 1;
+  weather = forecast;
+  const nextKey = rollWeather(day + 1);
+  forecast = WEATHER[nextKey];
+  forecastRun = (nextKey === weather.key) ? spellDays + 1 : 1;
+
+  if (webBlock > 0) webBlock--;
+  sprayResidual = 0;
+  trapFill = 0; trapCaughtToday = 0;
+  webKills = 0;
+  pruneWebs();
+}
+
+function updateBeetles(dt) {
+  const chewRate = BASE_CHEW * (0.45 + 1.0 * heatNow());
+
+  for (const b of beetles) {
+    b.wobble += dt * 5;
+    if (b.jolt > 0) b.jolt -= dt;
+
+    if (b.state === "arriving") {
+      b.x += (b.toX - b.x) * Math.min(1, dt * 1.7) + Math.sin(b.wobble) * 0.7;
+      b.y += (b.toY - b.y) * Math.min(1, dt * 1.7);
+      if (webs.length) checkWebs(b);
+      if (b.state === "arriving" && Math.hypot(b.toX - b.x, b.toY - b.y) < 6) {
+        if (b.toTrap) {
+          if (trapFill < TRAP_CAP) {
+            trapFill++; trapCaughtToday++;
+            b.state = "gone";
+            sfxTrap();
+            ripples.push({ x: b.x, y: b.y, radius: 5, life: 0.3 });
+          } else {
+            b.toTrap = false;   // bag is full; it settles for a plant
+            sendToPlant(b);
+          }
+        } else {
+          b.state = "feeding";
+        }
+      }
+
+    } else if (b.state === "feeding") {
+      if (b.plant.health > 0) {
+        b.plant.health = Math.max(0, b.plant.health - chewRate * dt);
+      }
+
+    } else if (b.state === "dropping") {
+      b.vy += 900 * dt;
+      b.y += b.vy * dt;
+      if (b.y > GROUND - 14) {
+        b.y = GROUND - 14;
+        if (onCloth(b) && caught < capacity) collect(b, b.x, GROUND - 10);
+        else startRecovery(b);
+      }
+
+    } else if (b.state === "recovering") {
+      b.timer -= dt;
+      b.y -= 70 * dt;
+      b.x += Math.sin(b.wobble * 0.7) * 40 * dt;
+      if (b.timer <= 0) sendToPlant(b);
+
+    } else if (b.state === "webbed") {
+      b.timer -= dt;
+      if (b.timer <= 0) { b.state = "gone"; webKills++; }
+
+    } else if (b.state === "leaving") {
+      b.y -= 130 * dt;
+      b.x += Math.sin(b.wobble * 0.5) * 30 * dt;
+    }
+
+    if (b.state === "feeding" && b.plant && b.plant.health <= 0) sendToPlant(b);
+  }
+
+  beetles = beetles.filter(b => b.state !== "gone" && b.y > -60);
+}
+
+function sendToPlant(b) {
+  const target = pickPlantByScent(b.avoid);
+  b.avoid = null;
+  if (!target) { b.state = "leaving"; b.toTrap = false; return; }
+  const spot = landingSpot(target);
+  b.plant = target; b.toX = spot.x; b.toY = spot.y;
+  b.state = "arriving"; b.toTrap = false;
+}
+
+function startRecovery(b, avoid) {
+  b.state = "recovering"; b.timer = 0.9; b.vy = 0;
+  b.avoid = avoid || null;
+}
+
+function onCloth(b) {
+  if (clothOn === null || !plots[clothOn]) return false;
+  return Math.abs(b.x - plots[clothOn].x) < CLOTH_REACH;
+}
+
+function updateScent(dt) {
+  for (const p of plots) if (p) p.feeders = 0;
+  for (const b of beetles) {
+    if (b.state === "feeding" && b.plant) b.plant.feeders++;
+  }
+
+  for (const p of plots) {
+    if (!p) continue;
+    p.scent = Math.max(0, Math.min(SCENT_CAP,
+      p.scent + p.feeders * SCENT_PER_BEETLE * dt - SCENT_DECAY * dt));
+    if (p.health <= 0) p.scent = 0;
+
+    p.moteTimer -= dt;
+    if (p.scent > 0.12 && p.moteTimer <= 0) {
+      p.moteTimer = 0.28 / p.scent;
+      motes.push({ x: p.x + (Math.random() - 0.5) * 56,
+                   y: GROUND - 40 - Math.random() * 60,
+                   drift: (Math.random() - 0.5) * 14, life: 2.0, maxLife: 2.0 });
+    }
+  }
+}
+
+function updateEffects(dt) {
+  animT += dt;
+  for (const s of splashes) {
+    s.vy += 380 * dt; s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+  }
+  splashes = splashes.filter(s => s.life > 0);
+  for (const r of ripples) { r.life -= dt; r.radius += 90 * dt; }
+  ripples = ripples.filter(r => r.life > 0);
+  for (const m of motes) { m.y -= 26 * dt; m.x += m.drift * dt; m.life -= dt; }
+  motes = motes.filter(m => m.life > 0);
+
+  if (phase === "day" && weather === WEATHER.rain) {
+    for (const d of raindrops) {
+      d.y += d.speed * dt;
+      if (d.y > GROUND) { d.y = -10; d.x = Math.random() * W; }
+    }
+  }
+}
+
+
+// ===========================================================================
+// 7. CATCHING, SHAKING, INPUT
+// ===========================================================================
+
+function catchQuality(b) {
+  const dx = Math.abs(b.x - hand.x);
+  const gap = hand.y - b.y;
+  if (gap < 4 || gap > 84) return 0;
+  return Math.max(0, 1 - dx / 44) * Math.max(0, 1 - Math.abs(gap - 30) / 54);
+}
+
+function neededFor(b) {
+  const inAir = b.state === "arriving" || b.state === "recovering";
+  const base = inAir ? 0.62 : (b.clinger ? 0.55 : 0.26);
+  return base * (0.55 + 0.55 * heatNow());
+}
+
+// Ranked by quality DIVIDED BY what that beetle needs, not by raw quality.
+// Ranking on quality alone meant a passing airborne beetle (needs 0.62) could
+// out-rank the feeding one you were actually aiming at (needs 0.26) — so the
+// game silently switched targets to something the click couldn't take.
+function bestTarget() {
+  let found = null, bestScore = 0, foundQ = 0;
+  for (const b of beetles) {
+    if (b.state === "dropping" || b.state === "leaving" ||
+        b.state === "webbed" || b.state === "gone") continue;
+    const q = catchQuality(b);
+    if (q <= 0) continue;
+    const score = q / neededFor(b);
+    if (score > bestScore) { bestScore = score; found = b; foundQ = q; }
+  }
+  return { beetle: found, quality: foundQ, score: bestScore };
+}
+
+function shakeTarget() {
+  if (phase !== "day") return null;
+  for (const p of plots) {
+    if (!p || p.health <= 0) continue;
+    if (Math.abs(hand.x - p.x) < 30 &&
+        hand.y > GROUND - 26 && hand.y < GROUND + 14) return p;
+  }
+  return null;
+}
+
+function shakePlant(p) {
+  p.shakeCd = SHAKE_COOLDOWN;
+  p.shakeAnim = 0.6;
+  sfxRustle();
+  const flyChance = SHAKE_FLY_BASE + SHAKE_FLY_HEAT * heatNow();
+  for (const b of beetles) {
+    if (b.state !== "feeding" || b.plant !== p) continue;
+    if (Math.random() < flyChance) {
+      // Some of the ones you startle into the air simply quit the garden.
+      if (Math.random() < SHAKE_ESCAPE) { b.state = "leaving"; b.toTrap = false; }
+      else startRecovery(b, p);   // it will settle somewhere else
+    } else { b.state = "dropping"; b.vy = 0; }
+  }
+}
+
+// Both of these used to be generous radii, which meant they swallowed clicks
+// meant for beetles on the nearest plant. They're now tight boxes around the
+// actual object, and low down where no leaf sits.
+function nearDrain() {
+  return Math.abs(hand.x - (DRAIN.x + DRAIN.w / 2)) < 58 && hand.y > GROUND - 24;
+}
+
+function nearTrap() {
+  if (trapAt === null) return false;
+  const bag = TRAP_SPOTS[trapAt].x + 22;
+  return Math.abs(hand.x - bag) < 34 &&
+         hand.y > GROUND - 145 && hand.y < GROUND - 15;
+}
+
+function collect(b, fx, fy) {
+  beetles.splice(beetles.indexOf(b), 1);
+  caught++;
+  spawnSplash(fx, fy);
+  sfxPlop();
+  ripples.push({ x: b.x, y: b.y, radius: 6, life: 0.35 });
+}
+
+function catchFallers() {
+  if (caught >= capacity || emptying > 0) return;
+  for (let i = beetles.length - 1; i >= 0; i--) {
+    const b = beetles[i];
+    if (b.state !== "dropping") continue;
+    const dy = b.y - hand.y;
+    if (Math.abs(b.x - hand.x) < 38 && dy > -6 && dy < 26) {
+      collect(b, hand.x, hand.y + 8);
+    }
+  }
+}
+
+function spawnSplash(x, y) {
+  for (let i = 0; i < 9; i++) {
+    splashes.push({ x: x + (Math.random() - 0.5) * 24, y,
+      vx: (Math.random() - 0.5) * 130, vy: -70 - Math.random() * 120,
+      life: 0.45 + Math.random() * 0.25 });
+  }
+}
+
+function toCanvas(e) {
+  const box = canvas.getBoundingClientRect();
+  return { x: (e.clientX - box.left) * (W / box.width),
+           y: (e.clientY - box.top) * (H / box.height) };
+}
+
+function moveHand(p) {
+  ptr.x = Math.max(30, Math.min(W - 30, p.x));
+  ptr.y = Math.max(60, Math.min(GROUND + 30, p.y));
+}
+
+// Called every frame. The container closes on the pointer at HAND_SPEED, so
+// a nudge between leaves is instant but a trip to the drain costs real time.
+function moveContainer(dt) {
+  const dx = ptr.x - hand.x, dy = ptr.y - hand.y;
+  const dist = Math.hypot(dx, dy);
+  const step = HAND_SPEED * dt;
+  const before = hand.x;
+  if (dist <= step || dist === 0) { hand.x = ptr.x; hand.y = ptr.y; }
+  else { hand.x += (dx / dist) * step; hand.y += (dy / dist) * step; }
+  handVel = hand.x - before;
+}
+
+function inRect(px, py, r) {
+  return px > r.x && px < r.x + r.w && py > r.y && py < r.y + r.h;
+}
+
+canvas.addEventListener("pointermove", (e) => moveHand(toCanvas(e)));
+
+// Everything a daytime click does, pulled out so a buffered click can run it
+// later. Called either straight from the event or once the container settles.
+function resolveClick() {
+  if (emptying > 0 || trapEmptying > 0) return;
+
+  const { beetle, score } = bestTarget();
+  const full = caught >= capacity;
+  const goodCatch = beetle && !full && score >= 1;
+
+  if (!goodCatch) {
+    if (nearDrain() && caught > 0) { emptying = emptyTime; sfxPour(); return; }
+    if (nearTrap() && trapFill > 0) { trapEmptying = TRAP_EMPTY_TIME; sfxPour(); return; }
+    const shakeMe = shakeTarget();
+    if (shakeMe) {
+      if (shakeMe.shakeCd <= 0) shakePlant(shakeMe);
+      return;
+    }
+  }
+
+  if (full) { fullWarning = 1.4; sfxThunk(); return; }
+  if (!beetle) return;
+
+  if (goodCatch) {
+    collect(beetle, hand.x, hand.y + 8);
+  } else if (beetle.clinger && beetle.state === "feeding") {
+    beetle.state = "dropping"; beetle.vy = 0;
+    sfxTick();
+    ripples.push({ x: beetle.x, y: beetle.y, radius: 6, life: 0.3 });
+  } else {
+    beetle.jolt = 0.25;
+    sfxTick();
+    ripples.push({ x: beetle.x, y: beetle.y, radius: 6, life: 0.22 });
+  }
+}
+
+function containerSettled() {
+  return Math.hypot(ptr.x - hand.x, ptr.y - hand.y) < 7;
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  ensureAudio();
+  const p = toCanvas(e);
+  moveHand(p);
+
+  if (phase === "title") {
+    phase = "day";
+    hint("start", "Hold the container under a beetle and click", 8);
+    return;
+  }
+  if (phase === "end") { resetGame(); return; }
+  if (phase === "shop") { shopClick(p); return; }
+
+  // Still in transit — hold the click and let it land on arrival.
+  if (!containerSettled()) { clickBuffer = CLICK_BUFFER; return; }
+  resolveClick();
+});
+
+function sfxSpray() {
+  if (!audio || muted) return;
+  const t = audio.currentTime;
+  noiseBurst(t, 0.9, 4200, 0.4, 0.16);
+  noiseBurst(t + 0.1, 0.7, 2200, 0.6, 0.10);
+}
+
+// Instant, total, and free at the moment you use it. Everything it costs
+// arrives later: the webs are gone, nothing re-establishes for a week, and
+// the beetles come back heavier than they left.
+function doSpray() {
+  if (sprayStock <= 0 || phase !== "day") return;
+  sprayStock--;
+  sprayDay = day;
+  runLog.sprays.push(day);
+  webs = [];
+  webBlock = SPRAY_WEB_BLOCK;
+  sprayResidual = SPRAY_RESIDUAL;
+  sprayFlash = 1.1;
+
+  for (const b of beetles) {
+    if (b.state === "gone") continue;
+    ripples.push({ x: b.x, y: b.y, radius: 4, life: 0.4 });
+    b.state = "gone";
+  }
+  sfxSpray();
+}
+
+function nearestPlant() {
+  let found = null, bd = 62;
+  for (const p of plots) {
+    if (!p || p.health <= 0) continue;
+    const d = Math.abs(hand.x - p.x);
+    if (d < bd) { bd = d; found = p; }
+  }
+  return found;
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.code === "KeyP" || e.code === "Escape") {
+    if (phase === "day") paused = !paused;
+    return;
+  }
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (phase !== "day") return;
+    ensureAudio();
+    const p = nearestPlant();
+    if (p && p.shakeCd <= 0) shakePlant(p);
+    return;
+  }
+  if (e.code === "KeyX") {
+    ensureAudio();
+    doSpray();
+    return;
+  }
+
+  // --- tuning shortcuts. Set DEBUG to false and none of this exists.
+  if (!DEBUG) return;
+  if (e.code === "Digit1") forecast = WEATHER.clear;
+  if (e.code === "Digit2") forecast = WEATHER.overcast;
+  if (e.code === "Digit3") forecast = WEATHER.scorcher;
+  if (e.code === "Digit4") forecast = WEATHER.rain;
+  if (e.code === "KeyN" && phase === "day") closeOutDay();
+  if (e.code === "KeyM") money += 100;
+  if (e.code === "KeyC") {
+    BASE_CHEW = CHEW_STEPS[(CHEW_STEPS.indexOf(BASE_CHEW) + 1) % CHEW_STEPS.length];
+  }
+  if (e.code === "KeyV") {
+    SHAKE_COOLDOWN = SHAKE_STEPS[(SHAKE_STEPS.indexOf(SHAKE_COOLDOWN) + 1) % SHAKE_STEPS.length];
+  }
+});
+
+
+// ===========================================================================
+// 8. DRAW
+// ===========================================================================
+
+function mix(a, b, t) {
+  return [Math.round(a[0] + (b[0] - a[0]) * t),
+          Math.round(a[1] + (b[1] - a[1]) * t),
+          Math.round(a[2] + (b[2] - a[2]) * t)];
+}
+function rgb(c) { return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")"; }
+
+function drawSky() {
+  const heat = Math.min(1, heatNow());
+  const daytime = phase === "day";
+  let top = daytime ? mix([46, 58, 72], [96, 122, 146], heat) : [12, 16, 22];
+  let low = daytime ? mix([74, 63, 51], [130, 118, 96], heat) : [26, 26, 24];
+
+  if (daytime && weather.tint) {
+    top = mix(top, weather.tint, weather.blend);
+    low = mix(low, weather.tint, weather.blend * 0.7);
+  }
+
+  const g = pen.createLinearGradient(0, 0, 0, GROUND);
+  g.addColorStop(0, rgb(top)); g.addColorStop(1, rgb(low));
+  pen.fillStyle = g; pen.fillRect(0, 0, W, GROUND);
+
+  pen.fillStyle = daytime ? rgb(mix([48, 54, 38], [66, 74, 48], heat)) : "#1b1e16";
+  pen.fillRect(0, GROUND, W, H - GROUND);
+  pen.fillStyle = daytime ? rgb(mix([46, 36, 26], [66, 53, 38], heat)) : "#1e1913";
+  pen.fillRect(BED.x, GROUND, BED.w, H - GROUND);
+
+  pen.strokeStyle = "rgba(120,96,64,0.65)";
+  pen.lineWidth = 4;
+  pen.strokeRect(BED.x, BED.y, BED.w, BED.h + 76);
+
+  if (daytime && weather.blend < 0.5) {
+    const t = dayFraction();
+    const sx = 70 + t * (W - 140);
+    const sy = GROUND - 40 - Math.sin(Math.PI * t) * 280;
+    const alpha = 1 - weather.blend * 1.4;
+    const glow = pen.createRadialGradient(sx, sy, 4, sx, sy, 70);
+    glow.addColorStop(0, "rgba(255,232,176," + (0.55 * alpha).toFixed(2) + ")");
+    glow.addColorStop(1, "rgba(255,232,176,0)");
+    pen.fillStyle = glow; pen.fillRect(sx - 80, sy - 80, 160, 160);
+    pen.fillStyle = "rgba(255,240,206," + (0.92 * alpha).toFixed(2) + ")";
+    pen.beginPath(); pen.arc(sx, sy, 15, 0, 6.29); pen.fill();
+  }
+
+  if (daytime && weather === WEATHER.rain) {
+    pen.strokeStyle = "rgba(186,204,214,0.30)";
+    pen.lineWidth = 1;
+    pen.beginPath();
+    for (const d of raindrops) { pen.moveTo(d.x, d.y); pen.lineTo(d.x - 3, d.y + 13); }
+    pen.stroke();
+  }
+}
+
+function drawTrap() {
+  if (trapAt === null) return;
+  const spot = TRAP_SPOTS[trapAt];
+  const x = spot.x;
+  const fill = trapFill / TRAP_CAP;
+  const working = trapWorking();
+
+  // The lure plume — amber, so it never reads as plant scent.
+  if (working) {
+    const grad = pen.createRadialGradient(x, GROUND - 130, 4, x, GROUND - 130, 120);
+    grad.addColorStop(0, "rgba(226,178,96,0.20)");
+    grad.addColorStop(1, "rgba(226,178,96,0)");
+    pen.fillStyle = grad;
+    pen.fillRect(x - 140, GROUND - 260, 280, 280);
+  }
+
+  pen.strokeStyle = "#6b5b44"; pen.lineWidth = 4;
+  pen.beginPath(); pen.moveTo(x, GROUND); pen.lineTo(x, GROUND - 132); pen.stroke();
+  pen.beginPath(); pen.moveTo(x, GROUND - 130); pen.lineTo(x + 22, GROUND - 130); pen.stroke();
+
+  // vanes above the bag
+  pen.strokeStyle = working ? "#e2b260" : "#6b6154"; pen.lineWidth = 2;
+  pen.beginPath();
+  pen.moveTo(x + 12, GROUND - 126); pen.lineTo(x + 32, GROUND - 126);
+  pen.moveTo(x + 22, GROUND - 136); pen.lineTo(x + 22, GROUND - 116);
+  pen.stroke();
+
+  const bx = x + 6, by = GROUND - 112, bw = 32, bh = 54;
+  const ready = phase === "day" && nearTrap() && trapFill > 0;
+  pen.fillStyle = "rgba(24,26,22,0.8)";
+  pen.fillRect(bx, by, bw, bh);
+  pen.fillStyle = fill >= 1 ? "rgba(196,85,61,0.85)" : "rgba(90,68,40,0.9)";
+  pen.fillRect(bx + 2, by + bh - 2 - (bh - 4) * fill, bw - 4, (bh - 4) * fill);
+  pen.strokeStyle = ready ? "#c7d676"
+                  : fill >= 1 ? "#c4553d" : "rgba(216,210,196,0.7)";
+  pen.lineWidth = ready ? 2.5 : 1.5; pen.strokeRect(bx, by, bw, bh);
+
+  pen.textAlign = "center"; pen.font = "11px ui-monospace, monospace";
+  pen.fillStyle = fill >= 1 ? "#c4553d" : "rgba(232,226,212,0.6)";
+  pen.fillText(fill >= 1 ? "FULL" : trapFill + "/" + TRAP_CAP, x + 22, GROUND + 14);
+  pen.fillStyle = "rgba(232,226,212,0.35)";
+  pen.fillText(spot.name, x + 22, GROUND + 30);
+
+  if (trapEmptying > 0) {
+    pen.fillStyle = "rgba(232,226,212,0.85)";
+    pen.fillText("emptying " + trapEmptying.toFixed(1) + "s", x + 22, GROUND - 128);
+  }
+}
+
+function drawCloth() {
+  if (clothOn === null || !plots[clothOn]) return;
+  const p = plots[clothOn];
+  pen.fillStyle = "rgba(206,198,178,0.55)";
+  pen.fillRect(p.x - CLOTH_REACH, GROUND - 4, CLOTH_REACH * 2, 12);
+  pen.strokeStyle = "rgba(232,226,212,0.4)";
+  pen.lineWidth = 1;
+  pen.strokeRect(p.x - CLOTH_REACH, GROUND - 4, CLOTH_REACH * 2, 12);
+}
+
+function drawEmptySlot(i) {
+  const x = SLOT_X[i];
+  pen.strokeStyle = "rgba(232,226,212,0.16)";
+  pen.setLineDash([4, 5]); pen.lineWidth = 1;
+  pen.strokeRect(x - 30, GROUND - 40, 60, 40);
+  pen.setLineDash([]);
+  pen.textAlign = "center"; pen.font = "11px ui-monospace, monospace";
+  pen.fillStyle = "rgba(232,226,212,0.3)";
+  pen.fillText("empty", x, GROUND + 26);
+}
+
+// The plume was always drawing — it lost its contrast when weather brightened
+// the daytime sky. Stronger alpha, a mid stop for definition, and a slow
+// breathing pulse, because motion is what the eye actually notices.
+function drawScent(p) {
+  const s = Math.min(1, p.scent / SCENT_CAP);
+  if (s < 0.03) return;
+  const pulse = 1 + Math.sin(animT * 1.5 + p.x * 0.02) * 0.07;
+  const cx = p.x, cy = GROUND - 108;
+  const r = (54 + 84 * s) * pulse;
+  const grad = pen.createRadialGradient(cx, cy, 3, cx, cy, r);
+  grad.addColorStop(0,    "rgba(208,226,102," + (0.36 * s).toFixed(3) + ")");
+  grad.addColorStop(0.45, "rgba(196,216,100," + (0.17 * s).toFixed(3) + ")");
+  grad.addColorStop(1,    "rgba(196,216,100,0)");
+  pen.fillStyle = grad;
+  pen.fillRect(cx - 160, cy - 170, 320, 340);
+}
+
+function drawWebs() {
+  for (const gi of webs) {
+    const x = GAP_X[gi], y = GROUND - 96;
+    pen.strokeStyle = "rgba(226,232,222,0.15)"; pen.lineWidth = 1;
+    for (let a = 0; a < 8; a++) {
+      const ang = a * Math.PI / 4;
+      pen.beginPath(); pen.moveTo(x, y);
+      pen.lineTo(x + Math.cos(ang) * 30, y + Math.sin(ang) * 30);
+      pen.stroke();
+    }
+    for (let r = 11; r <= 30; r += 9.5) {
+      pen.beginPath(); pen.arc(x, y, r, 0, 6.29); pen.stroke();
+    }
+    pen.fillStyle = "rgba(214,218,208,0.55)";
+    pen.beginPath(); pen.arc(x, y, 2.8, 0, 6.29); pen.fill();
+  }
+}
+
+function drawPlant(p, grabbed) {
+  const alive = p.health > 0;
+  const fraction = p.health / p.maxHealth;
+  const sway = p.shakeAnim > 0
+    ? Math.sin(p.shakeAnim * 44) * p.shakeAnim * 18 : 0;
+
+  if (alive && grabbed) {
+    pen.strokeStyle = p.shakeCd > 0
+      ? "rgba(232,226,212,0.22)" : "rgba(199,214,118,0.85)";
+    pen.lineWidth = 12;
+    pen.beginPath(); pen.moveTo(p.x, GROUND); pen.lineTo(p.x, GROUND - 26); pen.stroke();
+  }
+
+  pen.strokeStyle = alive ? "#3c5c30" : "#584a3a";
+  pen.lineWidth = 5;
+  pen.beginPath();
+  pen.moveTo(p.x, GROUND);
+  pen.quadraticCurveTo(p.x + sway * 0.35, GROUND - 80, p.x + sway, GROUND - 150);
+  pen.stroke();
+
+  const leaves = leafCount(p);
+  for (let i = 0; i < 6; i++) {
+    const leaf = leafPos(p, i);
+    const lean = sway * (0.25 + i * 0.13);
+    pen.fillStyle = i < leaves ? "#4f7a3a" : "rgba(88,74,58,0.35)";
+    pen.beginPath();
+    pen.ellipse(leaf.x + lean, leaf.y, 24, 11, leaf.side * 0.35, 0, 6.29);
+    pen.fill();
+  }
+  if (alive) {
+    pen.fillStyle = p.color;
+    pen.beginPath(); pen.arc(p.x + sway, GROUND - 158, 11, 0, 6.29); pen.fill();
+  }
+
+  pen.textAlign = "center"; pen.font = "11px ui-monospace, monospace";
+  pen.fillStyle = alive ? "rgba(232,226,212,0.7)" : "rgba(196,85,61,0.85)";
+  pen.fillText(alive ? p.name + " $" + p.value : "stripped", p.x, GROUND + 26);
+
+  if (alive) {
+    pen.fillStyle = "rgba(255,255,255,0.14)";
+    pen.fillRect(p.x - 36, GROUND + 34, 72, 4);
+    pen.fillStyle = fraction > 0.4 ? "#4f7a3a" : "#c4553d";
+    pen.fillRect(p.x - 36, GROUND + 34, 72 * fraction, 4);
+  }
+}
+
+function drawBeetle(b, score) {
+  const shake = b.jolt > 0 ? Math.sin(b.jolt * 90) * 3 : 0;
+  const inAir = b.state !== "feeding";
+  const bob = Math.sin(b.wobble) * (inAir ? 3.2 : 1.6);
+  const x = b.x + shake, y = b.y + bob;
+
+  if (b.state === "dropping") {
+    pen.strokeStyle = "rgba(232,226,212,0.5)"; pen.lineWidth = 1;
+    pen.beginPath(); pen.moveTo(x, y - 22); pen.lineTo(x, y - 8); pen.stroke();
+  }
+  // Solid and bright means the click will land. Dashed and faint means it
+  // won't — a highlight that appears on unreachable targets is worse than none.
+  if (score > 0) {
+    if (score >= 1) {
+      pen.setLineDash([]);
+      pen.strokeStyle = "rgba(206,224,104,0.95)";
+      pen.lineWidth = 2;
+      pen.beginPath(); pen.arc(x, y, 16, 0, 6.29); pen.stroke();
+    } else {
+      pen.setLineDash([3, 4]);
+      pen.strokeStyle = "rgba(232,226,212," + (0.15 + score * 0.25).toFixed(2) + ")";
+      pen.lineWidth = 1;
+      pen.beginPath(); pen.arc(x, y, 16 + (1 - score) * 8, 0, 6.29); pen.stroke();
+      pen.setLineDash([]);
+    }
+  }
+
+  pen.strokeStyle = "#20180f"; pen.lineWidth = 1.5;
+  for (const side of [-1, 1]) {
+    for (let i = -1; i <= 1; i++) {
+      pen.beginPath();
+      pen.moveTo(x + i * 4, y);
+      pen.lineTo(x + i * 5 + side * (b.clinger ? 14 : 11), y + (b.clinger ? 9 : 7));
+      pen.stroke();
+    }
+  }
+  if (inAir && b.state !== "dropping") {
+    pen.fillStyle = "rgba(226,232,222,0.30)";
+    for (const side of [-1, 1]) {
+      pen.beginPath();
+      pen.ellipse(x + side * 9, y - 5, 10, 4.5, side * 0.5, 0, 6.29);
+      pen.fill();
+    }
+  }
+  pen.fillStyle = b.clinger ? "#6d4520" : "#a1622c";
+  pen.beginPath();
+  pen.ellipse(x, y, b.clinger ? 12 : 11, b.clinger ? 8.5 : 8, 0, 0, 6.29); pen.fill();
+  pen.fillStyle = b.clinger ? "#2c4d32" : "#3d6b45";
+  pen.beginPath(); pen.ellipse(x - 8, y - 1, 5, 5.5, 0, 0, 6.29); pen.fill();
+  pen.fillStyle = "rgba(255,255,255,0.25)";
+  pen.beginPath(); pen.ellipse(x + 2, y - 3, 4, 1.8, -0.3, 0, 6.29); pen.fill();
+}
+
+function drawDrain() {
+  const near = phase === "day" && nearDrain();
+  pen.fillStyle = "#241d16";
+  pen.fillRect(DRAIN.x, DRAIN.y, DRAIN.w, DRAIN.h);
+  pen.strokeStyle = near ? "#c7d676" : "#6b6154";
+  pen.lineWidth = 2; pen.strokeRect(DRAIN.x, DRAIN.y, DRAIN.w, DRAIN.h);
+  pen.strokeStyle = "rgba(120,132,118,0.7)"; pen.lineWidth = 3;
+  for (let i = 1; i < 4; i++) {
+    pen.beginPath();
+    pen.moveTo(DRAIN.x + 8, DRAIN.y + i * 13);
+    pen.lineTo(DRAIN.x + DRAIN.w - 8, DRAIN.y + i * 13);
+    pen.stroke();
+  }
+  pen.textAlign = "center"; pen.font = "11px ui-monospace, monospace";
+  pen.fillStyle = near ? "#c7d676" : "rgba(232,226,212,0.5)";
+  pen.fillText("DRAIN", DRAIN.x + DRAIN.w / 2, DRAIN.y - 8);
+}
+
+function drawContainer() {
+  const w = ownQuart ? 58 : 46, h = ownQuart ? 50 : 40;
+  const cx = emptying > 0 ? DRAIN.x + DRAIN.w / 2 : hand.x;
+  const cy = emptying > 0 ? DRAIN.y - 34 : hand.y;
+  const tilt = emptying > 0 ? 0.9 : Math.max(-0.3, Math.min(0.3, handVel * 0.012));
+
+  const level = caught / capacity;
+  const drain = emptying > 0 ? emptying / emptyTime : 1;
+  // Suds are there from the start; beetles pile up in them and push the
+  // waterline up a little as they displace it.
+  const waterH = (h - 5) * (BASE_SUDS + 0.30 * level) * drain;
+  const bugH = (h - 5) * level * 0.62 * drain;
+
+  pen.save();
+  pen.translate(cx, cy); pen.rotate(tilt);
+  pen.fillStyle = "rgba(20,26,22,0.85)";
+  pen.fillRect(-w / 2, 0, w, h);
+
+  pen.fillStyle = caught >= capacity && emptying === 0
+    ? "rgba(198,160,150,0.85)" : "rgba(207,216,211,0.85)";
+  pen.fillRect(-w / 2 + 3, h - 2 - waterH, w - 6, waterH);
+
+  pen.fillStyle = "rgba(74,52,28,0.92)";
+  pen.fillRect(-w / 2 + 3, h - 2 - bugH, w - 6, bugH);
+
+  // a few carapaces catching the light near the surface
+  pen.fillStyle = "rgba(150,104,52,0.9)";
+  const specks = Math.min(7, Math.round(level * 12));
+  for (let i = 0; i < specks; i++) {
+    const sx = -w / 2 + 7 + ((i * 13) % (w - 14));
+    const sy = h - 4 - bugH - ((i * 5) % 9);
+    pen.fillRect(sx, sy, 4, 2.5);
+  }
+
+  pen.strokeStyle = fullWarning > 0 ? "#c4553d" : "rgba(216,210,196,0.9)";
+  pen.lineWidth = 2.5; pen.strokeRect(-w / 2, 0, w, h);
+  pen.beginPath(); pen.moveTo(-w / 2 - 4, 0); pen.lineTo(w / 2 + 4, 0); pen.stroke();
+  pen.restore();
+
+  pen.textAlign = "center"; pen.font = "11px ui-monospace, monospace";
+  pen.fillStyle = caught >= capacity ? "#c4553d" : "rgba(232,226,212,0.75)";
+  pen.fillText(caught + "/" + capacity, cx, cy + h + 16);
+}
+
+function drawEffects() {
+  for (const m of motes) {
+    pen.fillStyle = "rgba(212,230,110," + ((m.life / m.maxLife) * 0.75).toFixed(3) + ")";
+    pen.beginPath(); pen.arc(m.x, m.y, 2.4, 0, 6.29); pen.fill();
+  }
+  pen.fillStyle = "rgba(224,234,229,0.9)";
+  for (const s of splashes) {
+    pen.beginPath(); pen.arc(s.x, s.y, 2.2, 0, 6.29); pen.fill();
+  }
+  pen.lineWidth = 2;
+  for (const r of ripples) {
+    pen.strokeStyle = "rgba(232,226,212," + r.life * 1.8 + ")";
+    pen.beginPath(); pen.arc(r.x, r.y, r.radius, 0, 6.29); pen.stroke();
+  }
+}
+
+
+// ===========================================================================
+// 9. SHOP AND END
+// ===========================================================================
+
+function button(r, label, enabled) {
+  pen.fillStyle = enabled ? "rgba(199,214,118,0.16)" : "rgba(255,255,255,0.04)";
+  pen.fillRect(r.x, r.y, r.w, r.h);
+  pen.strokeStyle = enabled ? "#c7d676" : "rgba(232,226,212,0.18)";
+  pen.lineWidth = 1.5; pen.strokeRect(r.x, r.y, r.w, r.h);
+  pen.textAlign = "center"; pen.font = "12px ui-monospace, monospace";
+  pen.fillStyle = enabled ? "#e8e2d4" : "rgba(232,226,212,0.3)";
+  pen.fillText(label, r.x + r.w / 2, r.y + r.h / 2 + 4);
+}
+
+function chip(r, label, selected, enabled) {
+  const on = enabled !== false;
+  pen.fillStyle = selected ? "rgba(232,226,212,0.18)" : "rgba(255,255,255,0.04)";
+  pen.fillRect(r.x, r.y, r.w, r.h);
+  pen.strokeStyle = selected ? "rgba(232,226,212,0.85)"
+                  : on ? "rgba(232,226,212,0.22)" : "rgba(232,226,212,0.10)";
+  pen.lineWidth = selected ? 2 : 1;
+  pen.strokeRect(r.x, r.y, r.w, r.h);
+  pen.textAlign = "center"; pen.font = "12px ui-monospace, monospace";
+  pen.fillStyle = selected ? "#e8e2d4"
+                : on ? "rgba(232,226,212,0.55)" : "rgba(232,226,212,0.22)";
+  pen.fillText(label, r.x + r.w / 2, r.y + r.h / 2 + 4);
+}
+
+function itemRow(label, desc, labelY) {
+  pen.textAlign = "left";
+  pen.fillStyle = "#e8e2d4"; pen.font = "14px ui-monospace, monospace";
+  pen.fillText(label, SHOP.x + 34, SHOP.y + labelY);
+  pen.fillStyle = "rgba(232,226,212,0.5)"; pen.font = "11px ui-monospace, monospace";
+  pen.fillText(desc, SHOP.x + 34, SHOP.y + labelY + 18);
+}
+
+function drawShop() {
+  pen.fillStyle = "rgba(12,16,22,0.92)"; pen.fillRect(0, 0, W, H);
+  pen.fillStyle = "rgba(26,32,40,0.97)";
+  pen.fillRect(SHOP.x, SHOP.y, SHOP.w, SHOP.h);
+  pen.strokeStyle = "rgba(232,226,212,0.2)"; pen.lineWidth = 1;
+  pen.strokeRect(SHOP.x, SHOP.y, SHOP.w, SHOP.h);
+
+  pen.textAlign = "left";
+  pen.fillStyle = "#e8e2d4"; pen.font = "italic 23px Georgia, serif";
+  pen.fillText("Dusk, July " + day, SHOP.x + 34, SHOP.y + 42);
+  pen.font = "12px ui-monospace, monospace";
+  pen.fillStyle = "rgba(232,226,212,0.55)";
+  let took = "Earned $" + earnedToday;
+  if (ownTrap && trapAt !== null) took += "  ·  trap took " + trapCaughtToday;
+  took += "  ·  webs took " + webKills;
+  pen.fillText(took, SHOP.x + 34, SHOP.y + 64);
+
+  const grown = [];
+  for (const p of plots) if (p && p.grew > 0) grown.push(p.name.toLowerCase() + " +" + p.grew);
+  pen.fillStyle = "rgba(232,226,212,0.42)"; pen.font = "11px ui-monospace, monospace";
+  pen.fillText(webs.length + " webs in the garden" +
+               (grown.length ? "   ·   overnight: " + grown.join(", ") : ""),
+               SHOP.x + 34, SHOP.y + 84);
+
+  pen.textAlign = "right";
+  pen.fillStyle = "#c7d676"; pen.font = "18px ui-monospace, monospace";
+  pen.fillText("$" + money, SHOP.x + SHOP.w - 34, SHOP.y + 42);
+  pen.fillStyle = "rgba(232,226,212,0.6)"; pen.font = "12px ui-monospace, monospace";
+  pen.fillText("Tomorrow: " + forecast.label +
+               (forecastRun > 1 ? " — day " + forecastRun : ""),
+               SHOP.x + SHOP.w - 34, SHOP.y + 64);
+
+  if (day === 1) {
+    pen.textAlign = "left";
+    pen.fillStyle = "rgba(199,214,118,0.7)";
+    pen.font = "11px ui-monospace, monospace";
+    pen.fillText("Every plant pays what it is worth, scaled by how much of it survived.",
+                 SHOP.x + 34, SHOP.y + 84);
+  }
+
+  itemRow("Quart container", "Holds 28 instead of 15. Takes longer to empty.", 110);
+  button(BTN_QUART, ownQuart ? "owned" : "$" + QUART_COST,
+         !ownQuart && money >= QUART_COST);
+
+  itemRow("Drop cloth", "Shake a plant over it and the fallen gather themselves.", 154);
+  button(BTN_CLOTH, ownCloth ? "owned" : "$" + CLOTH_COST,
+         !ownCloth && money >= CLOTH_COST);
+  if (ownCloth) {
+    for (let i = 0; i < 5; i++) {
+      chip(CLOTH_SLOTS[i], plots[i] ? plots[i].name : "—", clothOn === i, !!plots[i]);
+    }
+  }
+
+  itemRow("Lure trap", "Catches well. Draws in more than it can hold.", 228);
+  button(BTN_TRAP, ownTrap ? "owned" : "$" + TRAP_COST,
+         !ownTrap && money >= TRAP_COST);
+  if (ownTrap) {
+    for (let i = 0; i < 3; i++) chip(TRAP_CHIPS[i], TRAP_SPOTS[i].name, trapAt === i);
+  }
+
+  itemRow("Broad-spectrum spray",
+          webBlock > 0 ? "Nothing will re-establish for " + webBlock + " more nights."
+                       : "Clears the garden instantly. Press X to use one.", 302);
+  button(BTN_SPRAY, sprayStock > 0 ? "$" + SPRAY_COST + "  (" + sprayStock + ")"
+                                   : "$" + SPRAY_COST,
+         money >= SPRAY_COST);
+
+  pen.textAlign = "left";
+  pen.fillStyle = "#e8e2d4"; pen.font = "14px ui-monospace, monospace";
+  pen.fillText("The bed", SHOP.x + 34, SHOP.y + 352);
+
+  for (let i = 0; i < 5; i++) {
+    chip(SLOT_CHIPS[i], plots[i] ? plots[i].name : "empty", pickedSlot === i);
+  }
+
+  pen.textAlign = "left";
+  pen.fillStyle = "rgba(232,226,212,0.45)";
+  pen.font = "11px ui-monospace, monospace";
+
+  if (pickedSlot === null) {
+    pen.fillText("Pick an empty slot to plant something in it.",
+                 SHOP.x + 35, SHOP.y + 410);
+  } else if (plots[pickedSlot] === null) {
+    pen.fillText("Slot " + (pickedSlot + 1) + " is open:", SHOP.x + 35, SHOP.y + 410);
+    for (let i = 0; i < 3; i++) {
+      const t = PLANT_TYPES[i];
+      button(PLANT_BTNS[i], t.name + " $" + t.cost, money >= t.cost);
+    }
+  } else {
+    pen.fillText("Slot " + (pickedSlot + 1) + " already holds a " +
+                 plots[pickedSlot].name.toLowerCase() + ".",
+                 SHOP.x + 35, SHOP.y + 410);
+  }
+
+  const t = (day + 1) / SEASON_DAYS;
+  pen.textAlign = "center";
+  pen.fillStyle = "rgba(232,226,212,0.45)"; pen.font = "11px ui-monospace, monospace";
+  pen.fillText("July " + (day + 1) + " of " + SEASON_DAYS +
+               (t > 0.32 && t < 0.7 ? "  ·  peak flight" : ""),
+               SHOP.x + SHOP.w / 2, SHOP.y + 462);
+  button(BTN_BEGIN, "begin July " + (day + 1), true);
+}
+
+function shopClick(p) {
+  if (!ownQuart && money >= QUART_COST && inRect(p.x, p.y, BTN_QUART)) {
+    money -= QUART_COST; ownQuart = true; runLog.quart = day;
+    capacity = QUART_CAPACITY; emptyTime = EMPTY_TIME_QUART;
+    return;
+  }
+  if (!ownCloth && money >= CLOTH_COST && inRect(p.x, p.y, BTN_CLOTH)) {
+    money -= CLOTH_COST; ownCloth = true; runLog.cloth = day;
+    clothOn = bestPlotForCloth();
+    return;
+  }
+  if (!ownTrap && money >= TRAP_COST && inRect(p.x, p.y, BTN_TRAP)) {
+    money -= TRAP_COST; ownTrap = true; runLog.trap = day;
+    trapAt = 0;                       // starts in the far corner, the safe spot
+    return;
+  }
+
+  if (money >= SPRAY_COST && inRect(p.x, p.y, BTN_SPRAY)) {
+    money -= SPRAY_COST; sprayStock++;
+    return;
+  }
+
+  if (ownCloth) {
+    for (let i = 0; i < 5; i++) {
+      if (plots[i] && inRect(p.x, p.y, CLOTH_SLOTS[i])) { clothOn = i; return; }
+    }
+  }
+  if (ownTrap) {
+    for (let i = 0; i < 3; i++) {
+      if (inRect(p.x, p.y, TRAP_CHIPS[i])) { trapAt = i; return; }
+    }
+  }
+
+  for (let i = 0; i < 5; i++) {
+    if (inRect(p.x, p.y, SLOT_CHIPS[i])) {
+      pickedSlot = pickedSlot === i ? null : i;
+      return;
+    }
+  }
+
+  if (pickedSlot !== null && plots[pickedSlot] === null) {
+    for (let i = 0; i < 3; i++) {
+      const type = PLANT_TYPES[i];
+      if (money >= type.cost && inRect(p.x, p.y, PLANT_BTNS[i])) {
+        money -= type.cost; runLog.planted++;
+        plant(type, pickedSlot);
+        if (ownCloth && clothOn === null) clothOn = pickedSlot;
+        pickedSlot = null;
+        return;
+      }
+    }
+  }
+
+  if (inRect(p.x, p.y, BTN_BEGIN)) beginNextDay();
+}
+
+function bestPlotForCloth() {
+  let bi = null, bv = -1;
+  for (let i = 0; i < 5; i++) {
+    const p = plots[i];
+    if (p && p.health > 0 && p.value > bv) { bv = p.value; bi = i; }
+  }
+  return bi;
+}
+
+function drawEnd() {
+  pen.fillStyle = "rgba(14,18,24,0.94)"; pen.fillRect(0, 0, W, H);
+  const cx = W / 2;
+  const score = seasonScore();
+
+  pen.textAlign = "center";
+  pen.fillStyle = "#e8e2d4"; pen.font = "italic 32px Georgia, serif";
+  pen.fillText(endReason === "season" ? "July is over." : "The garden is bare.",
+               cx, 92);
+
+  pen.font = "13px ui-monospace, monospace";
+  pen.fillStyle = "rgba(232,226,212,0.55)";
+  pen.fillText(endReason === "season"
+    ? "You never got every last one."
+    : "You made it to July " + day + " of " + SEASON_DAYS, cx, 120);
+
+  pen.font = "34px ui-monospace, monospace";
+  pen.fillStyle = "#c7d676";
+  pen.fillText(String(score), cx, 178);
+  pen.font = "11px ui-monospace, monospace";
+  pen.fillStyle = "rgba(232,226,212,0.45)";
+  pen.fillText(best > 0 && score >= best ? "SCORE  \u00b7  A NEW BEST"
+             : best > 0 ? "SCORE  \u00b7  BEST " + best : "SCORE", cx, 200);
+
+  // Everything a tester would otherwise have to remember.
+  const garden = [];
+  for (const gp of plots) if (gp) garden.push(gp.name + " " + Math.round(gp.health) + "%");
+
+  const bought = [];
+  if (runLog.cloth) bought.push("cloth Jul " + runLog.cloth);
+  if (runLog.quart) bought.push("quart Jul " + runLog.quart);
+  if (runLog.trap)  bought.push("trap Jul " + runLog.trap);
+  if (runLog.planted) bought.push(runLog.planted + " planted");
+
+  const rows = [
+    ["Garden at the end", garden.length ? garden.join("   ") : "nothing left"],
+    ["Bought", bought.length ? bought.join(",  ") : "nothing"],
+    ["Sprayed", runLog.sprays.length
+        ? runLog.sprays.map(d => "Jul " + d).join(",  ") : "never"],
+    ["Webs at the end", String(webs.length)],
+    ["Earned", "$" + money],
+  ];
+
+  let y = 254;
+  for (const r of rows) {
+    pen.textAlign = "right";
+    pen.font = "11px ui-monospace, monospace";
+    pen.fillStyle = "rgba(232,226,212,0.38)";
+    pen.fillText(r[0].toUpperCase(), cx - 18, y);
+    pen.textAlign = "left";
+    pen.font = "12px ui-monospace, monospace";
+    pen.fillStyle = "rgba(232,226,212,0.85)";
+    pen.fillText(r[1], cx + 18, y);
+    y += 27;
+  }
+
+  pen.textAlign = "center";
+  pen.fillStyle = "rgba(232,226,212,0.45)";
+  pen.font = "12px ui-monospace, monospace";
+  pen.fillText("click to start over", cx, y + 26);
+}
+
+function drawPaused() {
+  pen.fillStyle = "rgba(14,18,24,0.72)"; pen.fillRect(0, 0, W, H);
+  pen.textAlign = "center";
+  pen.fillStyle = "#e8e2d4"; pen.font = "italic 30px Georgia, serif";
+  pen.fillText("Paused", W / 2, H / 2 - 8);
+  pen.font = "12px ui-monospace, monospace";
+  pen.fillStyle = "rgba(232,226,212,0.5)";
+  pen.fillText("press P or escape to carry on", W / 2, H / 2 + 22);
+}
+
+function checkHints() {
+  if (caught >= Math.ceil(capacity * 0.6)) {
+    hint("drain", "Carry it to the drain and click to empty it");
+  }
+  if (sprayStock > 0) {
+    hint("spray", "Press X to spray. Afterwards, watch the web count.", 9);
+  }
+  if (ownCloth) {
+    hint("shake", "Press Space to shake a plant over the cloth", 8);
+  }
+  for (const b of beetles) {
+    if (b.clinger && b.state === "feeding") {
+      hint("clinger", "Darker beetles grip. Knock one loose and catch it falling.", 9);
+      break;
+    }
+  }
+  for (const p of plots) {
+    if (p && p.scent > SCENT_CAP * 0.55) {
+      hint("scent", "That haze is feeding scent — it pulls more beetles in", 8);
+      break;
+    }
+  }
+  if (webs.length && day > 1) {
+    hint("webs", "Spiders web the gaps between plants. They only need a gap.", 9);
+  }
+}
+
+function drawHint() {
+  if (hintTimer <= 0 || !hintText) return;
+  const fade = Math.min(1, hintTimer / 1.2);
+  pen.textAlign = "center";
+  pen.font = "13px ui-monospace, monospace";
+  pen.fillStyle = "rgba(16,20,26," + (0.55 * fade).toFixed(2) + ")";
+  const w = pen.measureText(hintText).width + 34;
+  pen.fillRect(W / 2 - w / 2, 62, w, 28);
+  pen.fillStyle = "rgba(232,226,212," + (0.92 * fade).toFixed(2) + ")";
+  pen.fillText(hintText, W / 2, 81);
+}
+
+function drawTitle() {
+  pen.fillStyle = "rgba(12,16,22,0.86)";
+  pen.fillRect(0, 0, W, H);
+
+  pen.textAlign = "center";
+  pen.fillStyle = "#e8e2d4";
+  pen.font = "italic 52px Georgia, serif";
+  pen.fillText("Every Last One", W / 2, 168);
+
+  pen.font = "14px ui-monospace, monospace";
+  pen.fillStyle = "rgba(232,226,212,0.6)";
+  pen.fillText("Thirty-one days of July. You will not get every last one.",
+               W / 2, 206);
+
+  const lines = [
+    "The container follows your pointer. Hold it under a beetle and click.",
+    "Space shakes the nearest plant.   X uses a spray, if you have one.",
+    "Carry a full container to the drain. You are paid at dusk on what's",
+    "still standing.   P pauses.",
+  ];
+  pen.font = "13px ui-monospace, monospace";
+  pen.fillStyle = "rgba(232,226,212,0.5)";
+  lines.forEach((l, i) => pen.fillText(l, W / 2, 274 + i * 24));
+
+  if (coarsePointer) {
+    pen.fillStyle = "rgba(224,122,95,0.92)";
+    pen.font = "13px ui-monospace, monospace";
+    pen.fillText("This needs a mouse or trackpad. Touch won't work well.",
+                 W / 2, 392);
+  } else if (best > 0) {
+    pen.fillStyle = "rgba(199,214,118,0.7)";
+    pen.fillText("best score  " + best, W / 2, 392);
+  }
+
+  pen.fillStyle = "rgba(232,226,212," +
+    (0.45 + Math.sin(animT * 2.2) * 0.3).toFixed(2) + ")";
+  pen.font = "14px ui-monospace, monospace";
+  pen.fillText("click to begin July", W / 2, 452);
+}
+
+function draw() {
+  const wantCursor = phase === "day" ? "none" : "default";
+  if (canvas.style.cursor !== wantCursor) canvas.style.cursor = wantCursor;
+
+  drawSky();
+  drawTrap();
+  drawCloth();
+  drawWebs();
+
+  const grabbed = shakeTarget();
+  const target = bestTarget();
+
+  for (let i = 0; i < 5; i++) {
+    const p = plots[i];
+    if (p) drawScent(p); else if (phase === "day") drawEmptySlot(i);
+  }
+  for (const p of plots) if (p) drawPlant(p, p === grabbed);
+
+  beetles.forEach(b => drawBeetle(b, b === target.beetle ? target.score : 0));
+
+  drawDrain();
+  drawEffects();
+  if (phase === "day") drawContainer();
+
+  pen.textAlign = "left";
+  pen.fillStyle = "rgba(232,226,212,0.6)";
+  pen.font = "12px ui-monospace, monospace";
+  pen.fillText("JULY " + day + " / " + SEASON_DAYS + "   " + clockLabel(), 20, 28);
+  pen.fillText(weather.label.toUpperCase() +
+               (spellDays > 1 ? " · DAY " + spellDays : "") +
+               "   $" + money, 20, 46);
+  if (sprayStock > 0 && phase === "day") {
+    pen.fillStyle = "rgba(226,178,96,0.75)";
+    pen.fillText("SPRAY ×" + sprayStock + "  —  PRESS X", 20, 64);
+  }
+
+  if (sprayFlash > 0) {
+    pen.fillStyle = "rgba(214,226,196," + (sprayFlash * 0.34).toFixed(3) + ")";
+    pen.fillRect(0, 0, W, H);
+  }
+
+  if (DEBUG && phase === "day") {
+    pen.fillStyle = "rgba(232,226,212,0.25)";
+    pen.font = "10px ui-monospace, monospace";
+    pen.fillText("debug: 1-4 weather · N next day · M +$100 · " +
+                 "C chew " + BASE_CHEW.toFixed(1) + " · V shake " + SHAKE_COOLDOWN.toFixed(1),
+                 20, H - 14);
+  }
+
+  if (emptying > 0) {
+    pen.textAlign = "center";
+    pen.fillStyle = "rgba(232,226,212,0.85)";
+    pen.fillText("emptying " + emptying.toFixed(1) + "s", W / 2, 30);
+  }
+
+  drawHint();
+  if (phase === "shop") drawShop();
+  if (phase === "end") drawEnd();
+  if (paused && phase === "day") drawPaused();
+  if (phase === "title") drawTitle();
+}
+
+
+// ===========================================================================
+// 10. THE LOOP
+// ===========================================================================
+
+// lastTime used to be seeded with performance.now() at load. The first frame
+// timestamp is the START of that frame's cycle, which can be EARLIER than the
+// moment this script finished parsing — so the first dt came out negative,
+// clock went below zero, and every colour downstream became NaN. Seeding from
+// the first frame removes the mismatch; the clamp makes it impossible anyway.
+let lastTime = null;
+
+function frame(now) {
+  if (lastTime === null) lastTime = now;
+  const dt = Math.min(0.05, Math.max(0, (now - lastTime) / 1000));
+  lastTime = now;
+  if (!paused) update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
