@@ -1,2 +1,2 @@
 # every-last-one
-Japanese Beetle Game
+A Garden Defense Game about Japanese Beetles
